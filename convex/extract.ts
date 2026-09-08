@@ -237,7 +237,6 @@ export function extractCandidates(body: string | null | undefined): Candidate[] 
 
   // 5. Bare lines: a whole comment (or list line) that is just a title.
   const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
-  const wholeIsShort = lines.length === 1 && text.trim().length <= 70;
   for (const line of lines) {
     if (line.length > 70) continue;
     if (/[.!?]$/.test(line) && !/\b(jr|sr|dr|mr|mrs|ms|st)\.$/i.test(line)) continue;
@@ -253,7 +252,7 @@ export function extractCandidates(body: string | null | undefined): Candidate[] 
       continue;
     }
     if (!lineLooksLikeTitle(line)) continue;
-    push({ title: line, confidence: wholeIsShort ? "low" : "low", source: "bare", raw: line });
+    push({ title: line, confidence: "low", source: "bare", raw: line });
   }
 
   return out;
@@ -268,9 +267,10 @@ function lineLooksLikeTitle(line: string): boolean {
   const caps = content.filter(isCapitalised).length;
   if (caps / content.length < 0.6) return false;
   if (GENERIC_TITLES.has(cleaned.toLowerCase())) return false;
-  // One capitalised word alone is too ambiguous ("Malazan" is fine, "Yes" is not),
-  // require at least 5 letters for single tokens.
-  if (tokens.length === 1 && cleaned.length < 5) return false;
+  // One capitalised word alone is ambiguous ("Dune" is a book, "Yes" is not);
+  // four letters is the floor, and the resolver's 0.9 similarity plus two
+  // editions gate carries the rest.
+  if (tokens.length === 1 && cleaned.length < 4) return false;
   return true;
 }
 

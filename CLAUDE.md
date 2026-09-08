@@ -42,7 +42,7 @@ Vendored from `packages/neorgon-ui/`: never edit in place, run the sync script i
 ## Data
 
 - Convex tables: `threads`, `books`, `mentions`, `shelves`, `lookups`, `counters`, `runs`, `kv` (see `convex/schema.ts`)
-- Deployment env vars (optional): `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USER_AGENT`. Set with `scripts/setup-reddit.sh`, never in a file.
+- Deployment env vars (optional): `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USER_AGENT`. Set with `scripts/setup-reddit.sh`. The wizard keeps the id and the User-Agent in the gitignored `.env` as re-run defaults; the secret exists on the Convex deployment only.
 - No localStorage. The browse position lives in the URL hash only.
 
 ## Conventions
@@ -73,11 +73,21 @@ Vendored from `packages/neorgon-ui/`: never edit in place, run the sync script i
   Open Library agrees (title similarity gated by extraction confidence, surname match
   when an author was named, a minimum edition count for bare lines). Loosen the gates
   in `resolve.ts`, not the regexes, and re-run the calibration first: on the 2026-09-08
-  sample 27 of 44 candidates resolved with no wrong book among them.
+  sample 27 of 44 candidates resolved with no wrong book among them. The class that
+  sample missed: a bare person's name ("Stephen King") resolves to the biography or
+  critical study with that exact title, so `pickMatch` refuses a two-or-three-token
+  capitalised candidate with no extracted author when the results agree it is a person.
 - **Lookups cache misses too**, keyed on normalised `title|author`. A string that
   resolved to nothing is not retried; delete its `lookups` row to force a retry.
 - **`trend7` is incremented at write time and only decays in the nightly `decay`
   action**, so a book's trend can read high for up to a day after its week ends.
+- **Aggregates have a reconciliation path**: `npx convex run ingest:recompute --prod`
+  rebuilds every book's counts, the shelves and the counters from the mentions table.
+  Run it after any change to `store.recordMentions`; the first version double-counted
+  `threadCount` when comments arrived out of time order (found in review, 2026-09-08).
+- **A thread the lookup budget cut short is left unmarked on purpose** (`pipeline.ts`),
+  so the next run returns to it. Marking it scanned was how books went missing silently
+  in the first version.
 - **Reddit token errors are classified by where they happen.** A 401 from the token
   endpoint is the id or secret; a 401/403 on a read drops the cached token in `kv`
   and the next run mints a new one; a 403 with a fresh token is almost always the

@@ -3,8 +3,8 @@
 //
 // A Convex action has a 10 minute ceiling and the archive wants a gentle
 // pace, so the backfill is chunked: each invocation handles up to
-// THREADS_PER_CHUNK threads, saves its cursor in kv, and schedules the next
-// chunk. Start it with
+// THREADS_PER_CHUNK threads or CHUNK_BUDGET_MS of wall clock, whichever comes
+// first, saves its cursor in kv, and schedules the next chunk. Start it with
 //
 //   npx convex run backfill:start '{"days": 30}'
 //
@@ -16,8 +16,9 @@ import { v } from "convex/values";
 import { fetchArchivePosts, fetchArchiveComments } from "./archive";
 import { processThread, type Budget } from "./pipeline";
 
-const THREADS_PER_CHUNK = 40;
-const LOOKUPS_PER_CHUNK = 250;
+const THREADS_PER_CHUNK = 25;
+const LOOKUPS_PER_CHUNK = 150;
+const CHUNK_BUDGET_MS = 7 * 60 * 1000; // the action ceiling is 10 minutes; stop starting threads here
 const MAX_CONSECUTIVE_FAILURES = 3;
 
 interface Progress {
@@ -71,7 +72,8 @@ export const chunk = internalAction({
     });
     const totals = { threadsSeen: 0, threadsScanned: 0, commentsScanned: 0, candidates: 0, lookups: 0, mentionsNew: 0, booksNew: 0 };
     const errors: string[] = [];
-    const budget: Budget = { lookupsLeft: LOOKUPS_PER_CHUNK };
+    const started = Date.now();
+    const budget: Budget = { lookupsLeft: LOOKUPS_PER_CHUNK, deadline: started + CHUNK_BUDGET_MS };
     let done = false;
     let listed = 0;
     try {
@@ -81,21 +83,24 @@ export const chunk = internalAction({
       if (!posts.length) done = true;
       for (const post of posts) {
         if (budget.lookupsLeft <= 0) { errors.push("lookup budget spent; resuming from this post next chunk"); break; }
+        if (Date.now() > budget.deadline) { errors.push("time budget spent; resuming from this post next chunk"); break; }
         try {
           const comments = await fetchArchiveComments(post.id);
           const s = await processThread(ctx, post, comments, "archive", budget);
+          if (s.budgetExhausted) { errors.push(`${post.id}: budget ran out mid-thread; it is refetched next chunk`); totals.commentsScanned += s.commentsScanned; totals.mentionsNew += s.mentionsNew; totals.booksNew += s.booksNew; totals.lookups += s.lookups; break; }
           totals.threadsScanned++;
           totals.commentsScanned += s.commentsScanned;
           totals.candidates += s.candidates;
           totals.lookups += s.lookups;
           totals.mentionsNew += s.mentionsNew;
           totals.booksNew += s.booksNew;
+          // Advance past this post; a same-second neighbour is refetched
+          // next chunk and deduplicated by upsertThread.
+          p.cursor = Math.floor(post.createdAt / 1000);
         } catch (e) {
           errors.push(`${post.id}: ${e instanceof Error ? e.message : String(e)}`);
+          p.cursor = Math.floor(post.createdAt / 1000);
         }
-        // Advance past this post either way; a same-second neighbour is
-        // refetched next chunk and deduplicated by upsertThread.
-        p.cursor = Math.floor(post.createdAt / 1000);
       }
       if (posts.length && posts.length < THREADS_PER_CHUNK && errors.length === 0) done = true;
     } catch (e) {

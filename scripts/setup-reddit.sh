@@ -191,7 +191,8 @@ _clear
 banner "Bouquin: Reddit Data API credentials"
 say "Six stages. The first decides which path you are on: an app that already"
 say "exists at reddit.com/prefs/apps (fast), or a new access request (slow)."
-say "Values go to $ENV_FILE (gitignored) and then to the Convex deployment."
+say "The id and User-Agent go to $ENV_FILE (gitignored) as re-run defaults;"
+say "the secret goes to the Convex deployment only."
 printf '\n'
 note "Nothing is sent anywhere until stage 5 asks you to confirm."
 pause
@@ -264,7 +265,10 @@ say "Same view, the field labelled 'secret'. It is not shown again after you"
 say "leave the page; if it is hidden, the edit view has a reveal control."
 ask_secret REDDIT_CLIENT_SECRET "Secret (hidden as you type)"
 if [ ${#REDDIT_CLIENT_SECRET} -lt 16 ]; then fail "that is too short to be an app secret"; exit 1; fi
-write_env REDDIT_CLIENT_SECRET "$REDDIT_CLIENT_SECRET"
+# The secret is not written to .env: it lives on the Convex deployment only,
+# so a re-run of this wizard asks for it again. The id and the User-Agent are
+# kept as re-run defaults; neither is sensitive on its own.
+note "kept in memory only; it goes to Convex in stage 5 and nowhere else on this machine"
 
 # ── 5. User-Agent and the deployment ─────────────────────────────────────────
 stage "Set the User-Agent and push all three to Convex"
@@ -279,14 +283,27 @@ printf '\n'
 say "Target deployment: the cron that matters runs on production. The dev"
 say "deployment (npx convex dev) can take the same values for local testing."
 ask CONVEX_TARGET "Write to which deployment? (prod/dev/both)"
+CONVEX_TARGET=$(printf '%s' "$CONVEX_TARGET" | tr '[:upper:]' '[:lower:]')
+case "$CONVEX_TARGET" in
+  prod|dev|both) ;;
+  *) fail "answer prod, dev or both (got '$CONVEX_TARGET'); nothing was written"; exit 1 ;;
+esac
+# Each variable is set on its own and every failure is collected, so a half
+# credential (id landed, secret did not) is reported rather than passed over.
+# The values travel in argv to the CLI, which is visible in `ps` for the
+# moment the command runs; acceptable on a personal machine, not on a shared one.
 push_env() {
-  local flag="$1" label="$2"
-  # shellcheck disable=SC2086
-  npx convex env set $flag REDDIT_CLIENT_ID "$REDDIT_CLIENT_ID" >/dev/null && \
-  npx convex env set $flag REDDIT_CLIENT_SECRET "$REDDIT_CLIENT_SECRET" >/dev/null && \
-  npx convex env set $flag REDDIT_USER_AGENT "$REDDIT_USER_AGENT" >/dev/null && \
-  { CAPTURED+=("REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USER_AGENT -> Convex $label"); ok "env vars set on $label"; } || \
-  fail "npx convex env set failed for $label (is the CLI logged in? see echeance: convex-cli)"
+  local flag="$1" label="$2" failed=""
+  for key in REDDIT_CLIENT_ID REDDIT_CLIENT_SECRET REDDIT_USER_AGENT; do
+    # shellcheck disable=SC2086
+    if ! npx convex env set $flag "$key" "${!key}" >/dev/null 2>&1; then failed="$failed $key"; fi
+  done
+  if [ -n "$failed" ]; then
+    fail "npx convex env set failed on $label for:$failed (is the CLI logged in? see echeance: convex-cli)"
+    exit 1
+  fi
+  CAPTURED+=("REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USER_AGENT -> Convex $label")
+  ok "env vars set on $label"
 }
 case "$CONVEX_TARGET" in
   prod|both)

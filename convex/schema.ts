@@ -88,6 +88,7 @@ export default defineSchema({
     source: sourceKind,
   })
     .index("by_book", ["bookId", "createdAt"])
+    .index("by_book_thread", ["bookId", "threadId"])
     .index("by_thread", ["threadId"])
     .index("by_comment_book", ["commentId", "bookId"]),
 

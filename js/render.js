@@ -1,7 +1,7 @@
 // ── Rendering ─────────────────────────────────────────────────
 // Pure DOM output from state. No fetching, no listeners (events.js owns those).
 
-import { $, escHtml, relTime, coverUrl, plural, monogram } from './utils.js';
+import { $, escHtml, relTime, coverUrl, plural, monogram, isoOrEmpty, redditUrl, openLibraryUrl } from './utils.js';
 
 const CATEGORY_LABELS = {
   fantasy: 'Fantasy', scifi: 'Sci-fi', mystery: 'Mystery & thriller', horror: 'Horror', romance: 'Romance',
@@ -18,12 +18,11 @@ export function renderStats(s) {
   const st = s.stats;
   if (!st) { el.textContent = ''; return; }
   if (!st.books) {
-    el.innerHTML = `<span>No books yet.</span> <span class="muted">${st.lastScan && st.lastScan.status === 'skipped'
-      ? 'The Reddit reader is not configured on this deployment yet.'
-      : 'The first scan runs within 30 minutes of deployment.'}</span>`;
+    el.innerHTML = '<span>No books yet.</span> <span class="muted">The first scan runs within 30 minutes of deployment.</span>';
     return;
   }
-  const updated = st.lastIngestAt ? `updated ${relTime(st.lastIngestAt)}` : 'first scan pending';
+  const via = st.lastScan && st.lastScan.source ? (st.lastScan.source === 'reddit' ? ' via Reddit' : ' via the archive') : '';
+  const updated = st.lastIngestAt ? `updated ${relTime(st.lastIngestAt)}${via}` : 'first scan pending';
   const backfill = st.backfill && st.backfill.running ? ` · <span class="live-dot" aria-hidden="true"></span>backfilling history, ${st.backfill.threads.toLocaleString()} threads so far` : '';
   el.innerHTML = `<strong>${plural(st.books, 'book')}</strong> from ${plural(st.mentions, 'mention')} across ${plural(st.threads, 'thread')} · ${escHtml(updated)}${backfill}`;
 }
@@ -55,7 +54,8 @@ function coverMarkup(b, size, cls) {
 
 export function renderCard(b) {
   const cats = b.categories.slice(0, 2).map((c) => `<span class="chip">${escHtml(categoryLabel(c))}</span>`).join('');
-  const seen = b.lastSeenAt ? `<time datetime="${new Date(b.lastSeenAt).toISOString()}">${relTime(b.lastSeenAt)}</time>` : '';
+  const iso = isoOrEmpty(b.lastSeenAt);
+  const seen = iso ? `<time datetime="${iso}">${relTime(b.lastSeenAt)}</time>` : '';
   const trend = b.trend7 >= 3 ? `<span class="book__trend" title="${b.trend7} mentions this week">▲ ${b.trend7} this week</span>` : '';
   return `
   <article class="book" data-id="${escHtml(b.id)}">
@@ -130,9 +130,11 @@ export function renderDetail(s) {
   const first = d.firstSeenAt ? relTime(d.firstSeenAt) : '';
   const counter = d.counterCount ? ` · ${plural(d.counterCount, 'counter-suggestion')}` : '';
   const mentions = d.mentions.map((m) => {
+    const threadHref = m.thread ? redditUrl(m.thread.permalink) : '';
     const thread = m.thread
-      ? `<a class="mention__thread" href="https://www.reddit.com${escHtml(m.thread.permalink)}" target="_blank" rel="noopener noreferrer">${escHtml(m.thread.title)}</a>${m.thread.flair ? ` <span class="mention__flair">${escHtml(m.thread.flair)}</span>` : ''}`
+      ? `${threadHref ? `<a class="mention__thread" href="${escHtml(threadHref)}" target="_blank" rel="noopener noreferrer">` : '<span class="mention__thread">'}${escHtml(m.thread.title)}${threadHref ? '</a>' : '</span>'}${m.thread.flair ? ` <span class="mention__flair">${escHtml(m.thread.flair)}</span>` : ''}`
       : '<span class="mention__thread muted">thread unavailable</span>';
+    const commentHref = redditUrl(m.permalink);
     const kind = m.kind === 'counter' && m.insteadOf
       ? `<span class="kind kind--counter">instead of ${escHtml(m.insteadOf)}</span>`
       : `<span class="kind kind--${m.kind}">${KIND_LABEL[m.kind] || m.kind}</span>`;
@@ -140,7 +142,7 @@ export function renderDetail(s) {
     <li class="mention">
       <div class="mention__head">${thread}</div>
       <blockquote class="mention__quote">${escHtml(m.snippet)}</blockquote>
-      <p class="mention__meta">${kind}${m.author ? ` · u/${escHtml(m.author)}` : ''} · ↑${m.score} · ${relTime(m.createdAt)} · <a href="https://www.reddit.com${escHtml(m.permalink)}" target="_blank" rel="noopener noreferrer">comment ↗</a></p>
+      <p class="mention__meta">${kind}${m.author ? ` · u/${escHtml(m.author)}` : ''} · ↑${m.score} · ${relTime(m.createdAt)}${commentHref ? ` · <a href="${escHtml(commentHref)}" target="_blank" rel="noopener noreferrer">comment ↗</a>` : ''}</p>
     </li>`;
   }).join('');
   body.innerHTML = `
@@ -151,7 +153,7 @@ export function renderDetail(s) {
       <p class="detail__facts">${[year, rating].filter(Boolean).join(' · ')}</p>
       <p class="detail__cats">${cats}</p>
       <p class="detail__counts">Named in <strong>${plural(d.mentionCount, 'comment')}</strong> across ${plural(d.threadCount, 'thread')}${counter}${first ? ` · first seen ${first}` : ''}${d.trend7 ? ` · ${d.trend7} this week` : ''}</p>
-      <p class="detail__links"><a class="btn btn--ghost btn--sm" href="https://openlibrary.org${escHtml(d.olKey)}" target="_blank" rel="noopener noreferrer">Open Library ↗</a> <a class="btn btn--ghost btn--sm" href="https://www.reddit.com/r/suggestmeabook/search/?q=${encodeURIComponent('"' + d.title + '"')}&restrict_sr=1" target="_blank" rel="noopener noreferrer">Search the sub ↗</a></p>
+      <p class="detail__links">${openLibraryUrl(d.olKey) ? `<a class="btn btn--ghost btn--sm" href="${escHtml(openLibraryUrl(d.olKey))}" target="_blank" rel="noopener noreferrer">Open Library ↗</a> ` : ''}<a class="btn btn--ghost btn--sm" href="https://www.reddit.com/r/suggestmeabook/search/?q=${encodeURIComponent('"' + d.title + '"')}&restrict_sr=1" target="_blank" rel="noopener noreferrer">Search the sub ↗</a></p>
     </div>
   </div>
   <h3 class="detail__h">Where it was named</h3>

@@ -56,8 +56,31 @@ function candidateIsAuthor(candidate: Candidate, doc: OlDoc): boolean {
   return (doc.author_name ?? []).some((n) => squash(n) === sq);
 }
 
+// "Stephen King" or "Agatha Christie" as a whole comment names an author,
+// not a book, and a title-scoped search returns the biography or the critical
+// study with that exact title. Two or three capitalised tokens, no author
+// extracted, and the results agree it is a person: refuse the whole candidate.
+function looksLikePersonName(title: string): boolean {
+  const tokens = title.trim().split(/\s+/);
+  if (tokens.length < 2 || tokens.length > 3) return false;
+  return tokens.every((t) => /^\p{Lu}[\p{L}'’.-]*$/u.test(t) && !/^(The|A|An|Of|And|In|On|To|For)$/.test(t));
+}
+
+function resultsSayPerson(title: string, docs: OlDoc[]): boolean {
+  const sq = squash(title);
+  let byThem = 0;
+  let aboutThem = 0;
+  for (const doc of docs) {
+    if ((doc.author_name ?? []).some((n) => squash(n) === sq)) byThem++;
+    const subj = (doc.subject ?? []).map((x) => x.toLowerCase());
+    if (squash(doc.title) === sq && subj.some((x) => /biograph|criticism|interpretation|interviews/.test(x))) aboutThem++;
+  }
+  return byThem >= 1 || aboutThem >= 1;
+}
+
 export function pickMatch(candidate: Candidate, docs: OlDoc[]): Match | null {
   const gate = GATES[candidate.confidence];
+  if (!candidate.author && looksLikePersonName(candidate.title) && resultsSayPerson(candidate.title, docs)) return null;
   let best: Match | null = null;
   for (const doc of docs) {
     if (!doc.title) continue;

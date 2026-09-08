@@ -55,14 +55,15 @@ async function loadMore(s) {
   renderGrid(s, { append: true });
   try {
     const page = await listBooks({ sort: s.sort, category: s.category, cursor: s.cursor, limit: PAGE });
-    if (seq !== s.requestSeq) return;
+    if (seq !== s.requestSeq) return; // a newer load owns s.loading now
     s.items = s.items.concat(page.items);
     s.cursor = page.cursor;
   } catch (e) {
     showToast(e.message);
+  } finally {
+    if (seq === s.requestSeq) s.loading = false;
   }
-  s.loading = false;
-  renderGrid(s, { append: true });
+  if (seq === s.requestSeq) renderGrid(s, { append: true });
 }
 
 export async function openBook(s, id) {

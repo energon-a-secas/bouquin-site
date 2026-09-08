@@ -168,10 +168,14 @@ export const markScanned = internalMutation({
   },
 });
 
+const mentionKindValidator = v.union(v.literal("suggestion"), v.literal("counter"), v.literal("second"));
+
 const draftValidator = v.object({
   bookId: v.id("books"),
   commentId: v.string(),
   parentCommentId: v.optional(v.string()),
+  kind: mentionKindValidator,
+  parentBookId: v.optional(v.id("books")),
   snippet: v.string(),
   score: v.number(),
   author: v.optional(v.string()),
@@ -185,36 +189,53 @@ export const recordMentions = internalMutation({
   handler: async (ctx, { threadId, source, drafts }): Promise<{ inserted: number }> => {
     let inserted = 0;
     const now = Date.now();
-    // Books named by each parent comment, for the counter/second decision.
-    // The parent may be in an earlier batch, so read from the table as well.
-    const byComment = new Map<string, Set<Id<"books">>>();
-    for (const d of drafts) {
-      if (!byComment.has(d.commentId)) byComment.set(d.commentId, new Set());
-      byComment.get(d.commentId)!.add(d.bookId);
-    }
+    // A reply whose parent named nothing in this fetch may still answer a
+    // comment recorded by an earlier scan: look the parent up once.
+    const parentCache = new Map<string, Set<Id<"books">>>();
     const parentBooks = async (commentId: string): Promise<Set<Id<"books">>> => {
-      if (byComment.has(commentId)) return byComment.get(commentId)!;
+      if (parentCache.has(commentId)) return parentCache.get(commentId)!;
       const rows = await ctx.db.query("mentions").withIndex("by_comment_book", (q) => q.eq("commentId", commentId)).collect();
       const set = new Set(rows.map((r) => r.bookId));
-      byComment.set(commentId, set);
+      parentCache.set(commentId, set);
       return set;
     };
 
     for (const d of drafts) {
-      const dup = await ctx.db
-        .query("mentions")
-        .withIndex("by_comment_book", (q) => q.eq("commentId", d.commentId).eq("bookId", d.bookId))
-        .unique();
-      if (dup) continue;
-      let kind: "suggestion" | "counter" | "second" = "suggestion";
-      let parentBookId: Id<"books"> | undefined;
-      if (d.parentCommentId) {
+      let kind = d.kind;
+      let parentBookId = d.parentBookId;
+      if (kind === "suggestion" && d.parentCommentId) {
         const parents = await parentBooks(d.parentCommentId);
         if (parents.size) {
           if (parents.has(d.bookId)) kind = "second";
           else { kind = "counter"; parentBookId = [...parents][0]; }
         }
       }
+
+      const dup = await ctx.db
+        .query("mentions")
+        .withIndex("by_comment_book", (q) => q.eq("commentId", d.commentId).eq("bookId", d.bookId))
+        .unique();
+      if (dup) {
+        // A rescan can learn the kind it could not know before (the parent's
+        // mention arrived later). Upgrade in place; never downgrade.
+        if (dup.kind === "suggestion" && kind !== "suggestion") {
+          await ctx.db.patch(dup._id, { kind, parentBookId });
+          if (kind === "counter") {
+            const b = (await ctx.db.get(d.bookId))!;
+            await ctx.db.patch(d.bookId, { counterCount: b.counterCount + 1 });
+          }
+        }
+        continue;
+      }
+
+      // Before the insert, and on the (book, thread) index: "has this book
+      // been named in this thread already" is the whole question.
+      const inThread = await ctx.db
+        .query("mentions")
+        .withIndex("by_book_thread", (q) => q.eq("bookId", d.bookId).eq("threadId", threadId))
+        .first();
+      const newThread = !inThread;
+
       await ctx.db.insert("mentions", {
         bookId: d.bookId,
         threadId,
@@ -233,12 +254,6 @@ export const recordMentions = internalMutation({
       await bump(ctx, "mentions", 1);
 
       const book = (await ctx.db.get(d.bookId))!;
-      const already = await ctx.db
-        .query("mentions")
-        .withIndex("by_book", (q) => q.eq("bookId", d.bookId))
-        .filter((q) => q.eq(q.field("threadId"), threadId))
-        .first();
-      const newThread = !already || already.commentId === d.commentId;
       await ctx.db.patch(d.bookId, {
         mentionCount: book.mentionCount + 1,
         threadCount: book.threadCount + (newThread ? 1 : 0),
@@ -255,6 +270,57 @@ export const recordMentions = internalMutation({
       await ctx.db.patch(threadId, { mentionCount: thread.mentionCount + inserted });
     }
     return { inserted };
+  },
+});
+
+// Reconciliation: recompute every aggregate on a page of books from the
+// mentions table, and the global counters on the final page. Run after a
+// write-path fix, or whenever a number on a card looks wrong.
+export const recomputeBooks = internalMutation({
+  args: { cursor: v.optional(v.string()), batch: v.number() },
+  handler: async (ctx, { cursor, batch }): Promise<{ done: boolean; cursor: string | null; touched: number }> => {
+    const page = await ctx.db.query("books").paginate({ numItems: batch, cursor: cursor ?? null });
+    const since = Date.now() - WEEK;
+    let touched = 0;
+    for (const book of page.page) {
+      const ms = await ctx.db.query("mentions").withIndex("by_book", (q) => q.eq("bookId", book._id)).collect();
+      const threads = new Set(ms.map((m) => m.threadId));
+      const next = {
+        mentionCount: ms.length,
+        threadCount: threads.size,
+        counterCount: ms.filter((m) => m.kind === "counter").length,
+        firstSeenAt: ms.length ? Math.min(...ms.map((m) => m.createdAt)) : book.firstSeenAt,
+        lastSeenAt: ms.length ? Math.max(...ms.map((m) => m.createdAt)) : 0,
+        trend7: ms.filter((m) => m.createdAt >= since).length,
+        scoreSum: ms.reduce((a, m) => a + m.score, 0),
+      };
+      const changed = (Object.keys(next) as (keyof typeof next)[]).some((k) => next[k] !== book[k]);
+      if (changed) {
+        await ctx.db.patch(book._id, next);
+        touched++;
+      }
+      await syncShelves(ctx, { ...book, ...next });
+    }
+    if (page.isDone) {
+      // Global counters, from the tables themselves. Bounded by the size of
+      // books and threads (thousands), never by mentions.
+      const setCounter = async (key: string, value: number) => {
+        const row = await ctx.db.query("counters").withIndex("by_key", (q) => q.eq("key", key)).unique();
+        if (row) await ctx.db.patch(row._id, { value });
+        else await ctx.db.insert("counters", { key, value });
+      };
+      const books = await ctx.db.query("books").collect();
+      await setCounter("books", books.length);
+      await setCounter("mentions", books.reduce((a, b) => a + b.mentionCount, 0));
+      const perCat = new Map<string, number>();
+      for (const b of books) if (b.mentionCount > 0) for (const c of b.categories) perCat.set(c, (perCat.get(c) ?? 0) + 1);
+      const counters = await ctx.db.query("counters").collect();
+      for (const row of counters) if (row.key.startsWith("cat:") && !perCat.has(row.key.slice(4))) await ctx.db.patch(row._id, { value: 0 });
+      for (const [c, n] of perCat) await setCounter(`cat:${c}`, n);
+      const threads = await ctx.db.query("threads").collect();
+      await setCounter("threads", threads.length);
+    }
+    return { done: page.isDone, cursor: page.isDone ? null : page.continueCursor, touched };
   },
 });
 

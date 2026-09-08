@@ -19,6 +19,7 @@ import { fetchArchivePosts, fetchArchiveComments } from "./archive";
 import { processThread, type Budget, type ThreadStats } from "./pipeline";
 
 const LOOKUPS_PER_SCAN = 150;          // Open Library requests one run may make
+const SCAN_BUDGET_MS = 7 * 60 * 1000;  // stop starting work here; the action ceiling is 10 minutes
 const ARCHIVE_WINDOW_H = 72;           // how far back the archive listing looks
 const ARCHIVE_THREADS_PER_SCAN = 30;
 
@@ -55,9 +56,11 @@ export const scan = internalAction({
         posts: posts.map((p) => ({ redditId: p.id, numComments: p.numComments, createdAt: p.createdAt })),
         max: maxThreads ?? (source === "reddit" ? MAX_THREADS_PER_SCAN : ARCHIVE_THREADS_PER_SCAN),
       });
-      const budget: Budget = { lookupsLeft: LOOKUPS_PER_SCAN };
+      const started = Date.now();
+      const budget: Budget = { lookupsLeft: LOOKUPS_PER_SCAN, deadline: started + SCAN_BUDGET_MS };
       for (const redditId of wanted) {
         if (budget.lookupsLeft <= 0) { errors.push(`lookup budget spent before ${redditId}; it stays queued`); break; }
+        if (Date.now() > budget.deadline) { errors.push(`time budget spent before ${redditId}; it stays queued`); break; }
         try {
           let post = byId.get(redditId)!;
           let comments;
@@ -69,12 +72,17 @@ export const scan = internalAction({
             post = { ...post, numComments: Math.max(post.numComments, comments.length) };
           }
           const s: ThreadStats = await processThread(ctx, post, comments, source, budget);
-          totals.threadsScanned++;
           totals.commentsScanned += s.commentsScanned;
           totals.candidates += s.candidates;
           totals.lookups += s.lookups;
           totals.mentionsNew += s.mentionsNew;
           totals.booksNew += s.booksNew;
+          if (s.budgetExhausted) {
+            // Left unmarked by processThread, so the next run returns to it.
+            errors.push(`${redditId}: budget ran out mid-thread; it stays queued`);
+            break;
+          }
+          totals.threadsScanned++;
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           errors.push(`${redditId}: ${msg}`);
@@ -106,14 +114,42 @@ export const decay = internalAction({
     const runId = await ctx.runMutation(internal.store.openRun, { kind: "trend" });
     let cursor: string | null = null;
     let touched = 0;
-    for (let i = 0; i < 200; i++) {
+    let done = false;
+    const deadline = Date.now() + SCAN_BUDGET_MS;
+    for (let i = 0; i < 2000 && Date.now() < deadline; i++) {
       const r: { done: boolean; cursor: string | null; touched: number } = await ctx.runMutation(internal.store.decayTrends, { cursor: cursor ?? undefined, batch: 50 });
       touched += r.touched;
-      if (r.done) break;
+      if (r.done) { done = true; break; }
       cursor = r.cursor;
     }
     await ctx.runMutation(internal.store.closeRun, {
-      runId, status: "ok", ...ZERO, note: `trend7 recomputed on ${touched} book(s)`, errors: [],
+      runId, status: done ? "ok" : "partial", ...ZERO,
+      note: done ? `trend7 recomputed on ${touched} book(s)` : `trend7 pass ran out of time after ${touched} book(s); the rest decays tomorrow`, errors: [],
     });
+  },
+});
+
+// Reconciliation entry point: npx convex run ingest:recompute [--prod].
+// Rebuilds every book aggregate, the shelves and the counters from mentions.
+export const recompute = internalAction({
+  args: {},
+  handler: async (ctx) => {
+    const runId = await ctx.runMutation(internal.store.openRun, { kind: "trend", note: "recompute aggregates" });
+    let cursor: string | null = null;
+    let touched = 0;
+    let pages = 0;
+    const deadline = Date.now() + SCAN_BUDGET_MS;
+    let done = false;
+    while (Date.now() < deadline) {
+      const r: { done: boolean; cursor: string | null; touched: number } = await ctx.runMutation(internal.store.recomputeBooks, { cursor: cursor ?? undefined, batch: 25 });
+      touched += r.touched; pages++;
+      if (r.done) { done = true; break; }
+      cursor = r.cursor;
+    }
+    await ctx.runMutation(internal.store.closeRun, {
+      runId, status: done ? "ok" : "partial", ...ZERO,
+      note: done ? `aggregates recomputed: ${touched} book(s) corrected over ${pages} page(s)` : `recompute ran out of time after ${pages} page(s); run it again`, errors: [],
+    });
+    return { done, touched, pages };
   },
 });

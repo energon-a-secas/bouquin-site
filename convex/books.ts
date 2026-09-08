@@ -127,11 +127,17 @@ export const categories = query({
 export const stats = query({
   args: {},
   handler: async (ctx) => {
-    const lastRuns = await ctx.db.query("runs").withIndex("by_startedAt").order("desc").take(12);
-    const lastScan = lastRuns.find((r) => r.kind === "scan");
-    const lastIngest = lastRuns.find((r) => (r.kind === "scan" || r.kind === "backfill") && r.status !== "skipped" && r.status !== "running");
+    // During a backfill one run row lands every few seconds, so the newest
+    // scan can sit far down the list: filter, do not take-and-find.
+    const lastScan = await ctx.db.query("runs").withIndex("by_startedAt").order("desc")
+      .filter((q) => q.eq(q.field("kind"), "scan")).first();
+    const lastIngest = await ctx.db.query("runs").withIndex("by_startedAt").order("desc")
+      .filter((q) => q.and(q.neq(q.field("kind"), "trend"), q.neq(q.field("status"), "running"), q.neq(q.field("status"), "skipped"))).first();
     const backfillRaw = await ctx.db.query("kv").withIndex("by_key", (q) => q.eq("key", "backfill")).unique();
-    const backfill = backfillRaw ? (JSON.parse(backfillRaw.value) as { threads: number; stopped?: boolean; chunks: number }) : null;
+    let backfill: { threads: number; stopped?: boolean; chunks: number } | null = null;
+    if (backfillRaw) {
+      try { backfill = JSON.parse(backfillRaw.value); } catch { backfill = null; }
+    }
     return {
       books: await counter(ctx, "books"),
       mentions: await counter(ctx, "mentions"),

@@ -24,11 +24,11 @@ export const state = {
 export function readHash(s) {
   const params = new URLSearchParams(location.hash.replace(/^#/, ''));
   const sort = params.get('sort');
-  if (sort && SORTS.includes(sort)) s.sort = sort;
+  s.sort = sort && SORTS.includes(sort) ? sort : 'newest';
   const cat = params.get('cat');
-  if (cat && /^[a-z]+$/.test(cat)) s.category = cat;
+  s.category = cat && /^[a-z]+$/.test(cat) ? cat : 'all';
   const q = params.get('q');
-  if (q) s.query = q.slice(0, 80);
+  s.query = q ? q.slice(0, 80) : '';
   const book = params.get('book');
   s.openBookId = book && /^[a-z0-9]+$/.test(book) ? book : null;
 }

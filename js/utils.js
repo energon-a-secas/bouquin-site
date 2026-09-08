@@ -14,7 +14,27 @@ export function escHtml(str) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/** ISO string for a datetime attribute, or empty when the number is not a date. */
+export function isoOrEmpty(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return '';
+  try { return new Date(ms).toISOString(); } catch { return ''; }
+}
+
+/** A reddit path from data becomes a URL only if it stays on reddit.com. */
+export function redditUrl(path) {
+  try {
+    const u = new URL(String(path || ''), 'https://www.reddit.com');
+    return u.origin === 'https://www.reddit.com' ? u.href : '';
+  } catch { return ''; }
+}
+
+/** An Open Library key from data becomes a URL only if it is a works/books path. */
+export function openLibraryUrl(key) {
+  return /^\/(works|books)\/OL[0-9]+[WM]$/.test(String(key || '')) ? `https://openlibrary.org${key}` : '';
 }
 
 /** Show a temporary toast notification. */
