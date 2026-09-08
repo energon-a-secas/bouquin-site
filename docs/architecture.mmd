@@ -1,0 +1,52 @@
+---
+config:
+  theme: base
+  themeVariables:
+    primaryColor: "#0f172a"
+    primaryTextColor: "#e2e8f0"
+    primaryBorderColor: "#0063e5"
+    lineColor: "#38bdf8"
+    secondaryColor: "#1e293b"
+    tertiaryColor: "#1e293b"
+    clusterBkg: "#f0f7ff"
+    clusterBorder: "#bfdbfe"
+    edgeLabelBackground: "#e8f0ff"
+    mainBkg: "#0f172a"
+    nodeBorder: "#0063e5"
+    titleColor: "#1e1b4b"
+    fontFamily: "ui-sans-serif, system-ui, -apple-system, sans-serif"
+    fontSize: "13px"
+---
+flowchart TB
+    User([Visitor]) --> HTML["index.html\nApp shell"]
+
+    subgraph Frontend["Frontend (ES modules, no build)"]
+        HTML --> app["app.js\nEntry point"]
+        app --> state["state.js\nSort, category, query, open book\n(mirrored in the URL hash)"]
+        app --> render["render.js\nStats, pills, cover grid, detail sheet"]
+        app --> events["events.js\nSort, pills, search, load more, modals"]
+        events --> api["api.js\nConvex HTTP API client"]
+        render --> Covers["covers.openlibrary.org\nCover images by cover id"]
+    end
+
+    subgraph Convex["Convex backend"]
+        api -->|"POST /api/query"| books["books.ts\nlist, search, get,\ncategories, stats"]
+        crons["crons.ts\nevery 30 min · nightly"] --> ingest["ingest.ts\nscan: pick source,\nrescan moved threads"]
+        backfill["backfill.ts\nchunked history seed\n(self-scheduling)"] --> pipeline
+        ingest --> pipeline["pipeline.ts\nextract · resolve · record"]
+        pipeline --> extract["extract.ts\nTitle by Author, {braces},\nemphasis, links, bare lines"]
+        pipeline --> resolve["resolve.ts\nmatch gates by confidence,\nsubjects to 14 categories"]
+        pipeline --> store["store.ts\nupsert thread/book,\nmentions, shelves, counters"]
+        books & store --> DB[("Database\nthreads · books · mentions\nshelves · lookups · counters · runs · kv")]
+    end
+
+    subgraph Sources["Outside services"]
+        Reddit["oauth.reddit.com\nData API, app-only OAuth\n(when REDDIT_* env vars exist)"]
+        Archive["arctic-shift.photon-reddit.com\nPublic Reddit archive\n(default, ~16 min behind)"]
+        OL["openlibrary.org/search.json\nWork key, authors, cover id,\nyear, subjects"]
+    end
+
+    ingest -->|"listing + comment trees"| Reddit
+    ingest -->|"posts + comments search"| Archive
+    backfill -->|"posts + comments by window"| Archive
+    resolve -->|"title (+author), cached in lookups"| OL
