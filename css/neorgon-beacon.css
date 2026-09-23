@@ -24,6 +24,11 @@
      read as one family when both are on screen. */
   --beacon-size: 40px;
   --beacon-offset: 20px;
+  /* How far the footer pushes the control up, written by beacon.js from the
+     footer's measured height whenever any of it is on screen. 0 is the
+     resting state, and also the state with JS off, where there is no control
+     to place. See README.md, "Clearing the footer". */
+  --beacon-clear: 0px;
   /* Above the footer kit's back-to-top (150), below the header (200) and
      modals (400). See packages/neorgon-ui/footer/footer.css:36. */
   --beacon-z: 160;
@@ -46,11 +51,17 @@
    Bottom LEFT, deliberately. The footer kit pins its back-to-top button at
    right:20px/bottom:20px on 69 vendored copies, so a bottom-right beacon
    would ship overlapping controls across the fleet and nothing would detect
-   it. */
+   it.
+
+   `max()` rather than a sum, so the two knobs cannot double up: the resting
+   offset applies while the footer is away, the measured clearance takes over
+   once it arrives, and a site that raises --beacon-offset still gets whichever
+   is larger instead of one added to the other. */
 .neo-beacon-link {
   position: fixed;
   left: calc(var(--beacon-offset) + env(safe-area-inset-left, 0px));
-  bottom: calc(var(--beacon-offset) + env(safe-area-inset-bottom, 0px));
+  bottom: calc(max(var(--beacon-offset), var(--beacon-clear, 0px))
+               + env(safe-area-inset-bottom, 0px));
   z-index: var(--beacon-z);
   display: inline-flex;
   align-items: center;

@@ -176,6 +176,100 @@
     window.open(url, '_blank', 'noopener');
   }
 
+  /* ── Clearing the footer (queue #88) ────────────────────────────────
+     A fixed bottom-left control assumes the bottom-left of the viewport
+     belongs to nobody. On a page that does not scroll, the footer kit pins
+     its bar to the viewport floor and this icon lands on that copy. Seven
+     sites pair the beacon with data-footer-mode="app", and two of them fixed
+     it by measuring their own footer and hardcoding --beacon-offset: 62px and
+     88px on aficion, 82px and 110px on portent. Four numbers, one
+     measurement, redone per site and per breakpoint, and wrong again as soon
+     as the footer copy wraps differently.
+
+     So the kit measures. --beacon-clear is however much of the footer is
+     inside the viewport plus GAP, and the CSS takes max() of that and the
+     resting offset: on a long page the control sits exactly where it always
+     did and rises only as the footer scrolls in. The hardcoded values were
+     this same arithmetic done by hand, which is why a 50px app footer plus
+     GAP is aficion's 62.
+
+     Measured, not derived from data-footer-mode: mode names a set of
+     paddings, not a height, and `minimal` alone ranges from one line to two.
+     ─────────────────────────────────────────────────────────────────── */
+  var GAP = 12;
+  var footer = null;
+  var observed = null;
+  var ro = null;
+  var queued = false;
+
+  function footerEl() {
+    /* Looked up late and re-looked-up when it goes away. Both this file and
+       footer.js are deferred, and which runs first is the host page's script
+       order, so a footer resolved once at init is a footer half the fleet
+       would not have found. */
+    if (footer && footer.isConnected) return footer;
+    footer = document.querySelector('.neo-footer');
+    return footer;
+  }
+
+  function clearance() {
+    var el = footerEl();
+    if (!el) return 0;
+    var box = el.getBoundingClientRect();
+    /* A zero height is display:none, a print sheet, or a footer the kit has
+       not filled in yet. Nothing to clear either way. */
+    if (box.height <= 0) return 0;
+    var view = window.innerHeight || 0;
+    /* The footer's TOP edge, measured up from the viewport floor. Not its
+       height: a long page's footer is below the fold and must move the control
+       nowhere, and a half-scrolled footer must be cleared by the part that is
+       actually in the way. */
+    var lift = view - box.top;
+    if (lift <= 0) return 0;
+    /* A footer taller than the viewport (content mode on a phone) would
+       otherwise push the control off the top of the screen, which is worse
+       than an overlap: the widget becomes unreachable. */
+    var ceiling = view - (link ? link.offsetHeight : 0) - GAP;
+    return Math.max(0, Math.min(Math.round(lift) + GAP, Math.round(ceiling)));
+  }
+
+  function place() {
+    queued = false;
+    if (link) link.style.setProperty('--beacon-clear', clearance() + 'px');
+  }
+
+  /* Coalesced into a frame. Scroll fires far more often than the control can
+     usefully move, and reading a rect per event is a layout read on the
+     scroll path of every site in the fleet. */
+  function schedule() {
+    if (queued) return;
+    queued = true;
+    if (window.requestAnimationFrame) window.requestAnimationFrame(place);
+    else setTimeout(place, 16);
+  }
+
+  function watchFooter() {
+    schedule();
+    if (!window.ResizeObserver) return;
+    var el = footerEl();
+    if (!el || el === observed) return;
+    if (!ro) ro = new window.ResizeObserver(schedule);
+    ro.observe(el);
+    observed = el;
+  }
+
+  function watch() {
+    place();
+    window.addEventListener('scroll', schedule, { passive: true });
+    window.addEventListener('resize', schedule);
+    /* The footer changes height with no scroll and no resize: the kit appends
+       its bar after this script may have run, a disclaimer dialog closes, a
+       webfont lands and one line becomes two. `load` catches the late build,
+       the observer catches the rest. */
+    window.addEventListener('load', watchFooter);
+    watchFooter();
+  }
+
   /* ── The control ────────────────────────────────────────────────── */
   function buildLink() {
     var a = document.createElement('a');
@@ -248,6 +342,7 @@
     document.addEventListener('pointerdown', remember, true);
     link = buildLink();
     refresh();
+    watch();
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
