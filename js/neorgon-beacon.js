@@ -201,6 +201,7 @@
   var observed = null;
   var ro = null;
   var queued = false;
+  var placed = null;
 
   function footerEl() {
     /* Looked up late and re-looked-up when it goes away. Both this file and
@@ -233,9 +234,15 @@
     return Math.max(0, Math.min(Math.round(lift) + GAP, Math.round(ceiling)));
   }
 
+  /* Written only when it changes. Most frames on a long page measure 0 again,
+     and a write is a style invalidation on the scroll path for nothing. */
   function place() {
     queued = false;
-    if (link) link.style.setProperty('--beacon-clear', clearance() + 'px');
+    if (!link) return;
+    var value = clearance() + 'px';
+    if (value === placed) return;
+    placed = value;
+    link.style.setProperty('--beacon-clear', value);
   }
 
   /* Coalesced into a frame. Scroll fires far more often than the control can
@@ -251,9 +258,22 @@
   function watchFooter() {
     schedule();
     if (!window.ResizeObserver) return;
+    if (!ro) {
+      ro = new window.ResizeObserver(schedule);
+      /* The footer's POSITION, which its own size says nothing about. It sits
+         in flow after the page's content, so content that arrives late (a
+         view rendered from a fetch, an image, a webfont reflowing a long
+         page) pushes it down with no scroll, no resize and no change to its
+         height. Runcible measured 345px while its #view still said "Loading"
+         and kept it over the chapter text until the reader scrolled. Content
+         that moves the footer changes the body's height, so the body is
+         observed too. Not a MutationObserver: that fires on every text node a
+         timer touches, and most mutations move nothing. */
+      ro.observe(document.body);
+    }
     var el = footerEl();
     if (!el || el === observed) return;
-    if (!ro) ro = new window.ResizeObserver(schedule);
+    if (observed) ro.unobserve(observed);
     ro.observe(el);
     observed = el;
   }
@@ -262,10 +282,11 @@
     place();
     window.addEventListener('scroll', schedule, { passive: true });
     window.addEventListener('resize', schedule);
-    /* The footer changes height with no scroll and no resize: the kit appends
-       its bar after this script may have run, a disclaimer dialog closes, a
-       webfont lands and one line becomes two. `load` catches the late build,
-       the observer catches the rest. */
+    /* The footer moves or changes height with no scroll and no resize: the
+       kit appends its bar after this script may have run, a disclaimer dialog
+       closes, a webfont lands and one line becomes two, a view renders late
+       and pushes it below the fold. `load` catches the late build, the
+       observer on the footer and the body catches the rest. */
     window.addEventListener('load', watchFooter);
     watchFooter();
   }
