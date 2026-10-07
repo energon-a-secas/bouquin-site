@@ -202,6 +202,9 @@
   var ro = null;
   var queued = false;
   var placed = null;
+  /* Frames still loading, and whether the observer is on: see below. */
+  var waiting = [];
+  var watching = false;
 
   function footerEl() {
     /* Looked up late and re-looked-up when it goes away. Both this file and
@@ -257,9 +260,9 @@
 
   function watchFooter() {
     schedule();
-    if (!window.ResizeObserver) return;
-    if (!ro) {
-      ro = new window.ResizeObserver(schedule);
+    if (!window.ResizeObserver || waiting.length) return;
+    if (!ro) ro = new window.ResizeObserver(schedule);
+    if (!watching) {
       /* The footer's POSITION, which its own size says nothing about. It sits
          in flow after the page's content, so content that arrives late (a
          view rendered from a fetch, an image, a webfont reflowing a long
@@ -270,12 +273,120 @@
          observed too. Not a MutationObserver: that fires on every text node a
          timer touches, and most mutations move nothing. */
       ro.observe(document.body);
+      watching = true;
     }
     var el = footerEl();
     if (!el || el === observed) return;
     if (observed) ro.unobserve(observed);
     ro.observe(el);
     observed = el;
+  }
+
+  /* ── Standing aside while a frame loads ─────────────────────────────
+     Firefox answers a ResizeObserver by flushing layout for every
+     same-process document in the page's tree before it notifies, and a frame
+     still fetching its stylesheets is one of them. Its layout is forced
+     before its sheets arrive, which risks a flash of unstyled content and
+     logs "Layout was forced before the page was fully loaded". Runcible's
+     Yomu reader logged it on 10 loads of 10 while this kit kept one.
+
+     So while any frame on the page is still loading, the kit keeps no
+     ResizeObserver: it disconnects, or never connects. Scroll, resize and
+     load still place the control; a rect read flushes this document and its
+     ancestors, never a frame inside it. When the last frame fires load (or
+     error) the observer comes back, and one placement catches up with
+     whatever moved while it was away.
+
+     A frame that never fires load (a lazy one far below the fold, a host
+     that never answers) must not switch the observer off for good, so each
+     one is waited for FRAME_WAIT at most and then stops counting. */
+  var FRAME_WAIT = 10000;
+
+  function loadsDocument(frame) {
+    if (frame.hasAttribute('srcdoc')) return true;
+    /* No src, or about:blank, is the empty document every frame starts
+       with: no stylesheet to wait for, and its load fires during the
+       insertion itself, before any observer could hear it. */
+    var src = (frame.getAttribute('src') || '').trim();
+    return src !== '' && !/^about:/i.test(src);
+  }
+
+  function expect(frame) {
+    if (!frame.isConnected || !loadsDocument(frame)) return;
+    for (var i = 0; i < waiting.length; i++) {
+      if (waiting[i].frame === frame) return;
+    }
+    /* early: it began loading before the page's own load, see onLoad. */
+    var w = { frame: frame, early: document.readyState !== 'complete' };
+    w.done = function () { if (drop(w) && !waiting.length) watchFooter(); };
+    frame.addEventListener('load', w.done);
+    frame.addEventListener('error', w.done);
+    w.timer = setTimeout(w.done, FRAME_WAIT);
+    waiting.push(w);
+  }
+
+  function drop(w) {
+    var at = waiting.indexOf(w);
+    if (at < 0) return false;
+    waiting.splice(at, 1);
+    clearTimeout(w.timer);
+    w.frame.removeEventListener('load', w.done);
+    w.frame.removeEventListener('error', w.done);
+    return true;
+  }
+
+  function standAside() {
+    if (ro) ro.disconnect();
+    watching = false;
+    observed = null;
+    /* Whatever inserted the frame may have moved the footer too, and the
+       observer that would have said so is gone. */
+    schedule();
+  }
+
+  /* Frames arrive at any time: Runcible builds Yomu's when its reader sheet
+     first opens. The stance above, no MutationObserver, is about measuring
+     on one. This one never measures. A clock that writes textContent every
+     second does wake it (that replaces a child node), and each wake costs a
+     nodeType test per added node and a tag lookup inside each added
+     element: Runcible's 27 routes cost 53 wakes and 1.2ms in all. It reads
+     no layout, writes no style and schedules nothing unless a frame went in
+     or one being waited for went out. */
+  function onMutations(records) {
+    var had = waiting.length;
+    var removed = false;
+    for (var i = 0; i < records.length; i++) {
+      var added = records[i].addedNodes;
+      for (var j = 0; j < added.length; j++) {
+        var node = added[j];
+        if (node.nodeType !== 1) continue;
+        if (node.localName === 'iframe') expect(node);
+        else if (node.firstElementChild) {
+          var inner = node.getElementsByTagName('iframe');
+          for (var k = 0; k < inner.length; k++) expect(inner[k]);
+        }
+      }
+      if (records[i].removedNodes.length) removed = true;
+    }
+    /* A frame taken out before it loaded never fires load. */
+    if (removed) {
+      for (var n = waiting.length - 1; n >= 0; n--) {
+        if (!waiting[n].frame.isConnected) drop(waiting[n]);
+      }
+    }
+    if (!had && waiting.length) standAside();
+    else if (had && !waiting.length) watchFooter();
+  }
+
+  function onLoad() {
+    /* The page's load waits for every frame that began loading before it,
+       lazy ones aside, so a frame like that still listed here loaded before
+       the kit was listening to it. */
+    for (var i = waiting.length - 1; i >= 0; i--) {
+      var w = waiting[i];
+      if (w.early && w.frame.getAttribute('loading') !== 'lazy') drop(w);
+    }
+    watchFooter();
   }
 
   function watch() {
@@ -287,7 +398,17 @@
        closes, a webfont lands and one line becomes two, a view renders late
        and pushes it below the fold. `load` catches the late build, the
        observer on the footer and the body catches the rest. */
-    window.addEventListener('load', watchFooter);
+    window.addEventListener('load', onLoad);
+    if (window.ResizeObserver) {
+      /* Frames already in the page count as loading: nothing outside a
+         frame can tell whether one has finished. */
+      var found = document.getElementsByTagName('iframe');
+      for (var i = 0; i < found.length; i++) expect(found[i]);
+      if (window.MutationObserver) {
+        new window.MutationObserver(onMutations)
+          .observe(document, { childList: true, subtree: true });
+      }
+    }
     watchFooter();
   }
 
